@@ -1,4 +1,4 @@
-# network-agent
+# Linux network
 
 ## 包路径
 
@@ -66,4 +66,68 @@ POSTROUTING
 
 ---
 
-## 
+## DNAT / SNAT / MASQUERADE
+
+|             | DNAT                    | SNAT                      | MASQUERADE      |
+| ----------- | ----------------------- | ------------------------- | --------------- |
+| 修改对象    | 目标 IP / 端口          | 源 IP / 端口              | 源 IP / 端口    |
+| 常见表      | `nat`                   | `nat`                     | `nat`           |
+| 常见链      | `PREROUTING` / `OUTPUT` | `POSTROUTING`             | `POSTROUTING`   |
+| 典型用途    | 转发到新目标            | 保证回包路径 / 隐藏源地址 | 动态出口 NAT    |
+| 是否指定 IP | 指定新目标 IP           | 指定新源 IP               | 自动选择出口 IP |
+
+```text
+DNAT：改目标，让包去正确的地方
+SNAT：改源，让回包回到正确的地方
+MASQUERADE：动态 SNAT，自动使用出口网卡 IP
+```
+
+## conntrack
+
+`connection tracking` （Linux 内核维护的一张连接状态表）
+
+- DNAT 改请求包的目标地址，conntrack 负责让回包源地址被还原
+- SNAT 改请求包的源地址，conntrack 负责让回包目标地址被还原
+
+---
+
+## MARK + ip rule + ip route
+
+外部包：
+
+```text
+外部包进入
+  ↓
+mangle PREROUTING
+  └─ MARK：打 0x100
+  ↓
+ip rule
+  └─ fwmark 0x100 -> table 100
+  ↓
+ip route table 100
+  └─ 决定出口网卡 / 下一跳
+  ↓
+继续转发或交给本机
+```
+
+本机包：
+
+```text
+本机进程发包
+  ↓
+mangle OUTPUT
+  └─ MARK：打 0x100
+  ↓
+ip rule
+  └─ fwmark 0x100 -> table 100
+  ↓
+ip route table 100
+  └─ 决定出口网卡 / 下一跳
+  ↓
+POSTROUTING
+  ↓
+发出
+```
+
+---
+
