@@ -131,3 +131,100 @@ POSTROUTING
 
 ---
 
+## IPVS
+
+> Masq 模式（`NAT / Masquerading 转发模式`）下，请求和回包通常都经过 IPVS 节点。
+
+```text
+请求路径：
+
+client
+  ↓
+VIP:Port
+  ↓
+IPVS 节点
+  ↓
+Real Server / PodIP:Port
+
+
+回包路径：
+
+Real Server / PodIP:Port
+  ↓
+IPVS 节点
+  ↓
+client
+```
+
+| 对比项     | iptables DNAT    | IPVS                         |
+| ---------- | ---------------- | ---------------------------- |
+| 核心对象   | rule / chain     | Virtual Server / Real Server |
+| 核心能力   | 修改目标地址     | 四层负载均衡                 |
+| 多后端支持 | 需要多条规则配合 | 原生支持                     |
+| 后端选择   | 靠规则           | 靠 Scheduler                 |
+| 查看方式   | `iptables-save`  | `ipvsadm -Ln`                |
+| 典型场景   | 简单地址转换     | VIP 到多后端负载均衡         |
+
+```text
+iptables DNAT 更像“改目标地址”；
+IPVS 更像“带后端选择能力的内核负载均衡器”。
+```
+
+## ipvsadm -Ln
+
+```text
+IP Virtual Server version 1.2.1 (size=4096)
+Prot LocalAddress:Port Scheduler Flags
+  -> RemoteAddress:Port           Forward Weight ActiveConn InActConn
+TCP  10.0.0.100:18999 rr
+  -> 10.244.1.23:18999            Masq    1      0          5
+  -> 10.244.2.45:18999            Masq    1      0          3
+```
+
+```
+存在一个 TCP 虚拟服务：10.0.0.100:18999
+它使用 rr 轮询算法
+下面有两个真实后端：
+  10.244.1.23:18999
+  10.244.2.45:18999
+这两个后端都使用 Masq/NAT 转发模式
+权重都是 1
+当前活跃连接数都是 0
+非活跃连接数分别是 5 和 3
+```
+
+> **调度算法**：
+>
+> - `rr = Round Robin` ：轮询
+> - `sh = Source Hashing` ：源地址哈希
+
+---
+
+## TEE 流量镜像
+
+```bash
+iptables -t mangle -A PREROUTING \
+  -d 10.0.0.100 \
+  -p udp --dport 18999 \
+  -j TEE --gateway 192.168.1.200
+```
+
+| 维度          | 原包                                | TEE 镜像包                     | 关键说明                                                     |
+| ------------- | ----------------------------------- | ------------------------------ | ------------------------------------------------------------ |
+| 本质          | 正常业务包                          | clone 出来的副本               | <span style="color:red">原包是主路径，镜像包是旁路副本</span> |
+| 路径          | 继续原规则链、路由、NAT/IPVS        | 发往 `--gateway` 指定下一跳    | 路径不同                                                     |
+| 下一跳        | 正常路由决定                        | `--gateway` 指定               | TEE 改的是副本下一跳                                         |
+| 源 IP         | 复制时刻的源 IP，后续可能被 SNAT    | 复制时刻的源 IP                | 复制瞬间通常相同                                             |
+| 目的 IP       | 复制时刻的目的 IP，后续可能被 DNAT  | 复制时刻的目的 IP              | TEE 不会自动改目的 IP                                        |
+| 源端口        | 复制时刻的源端口                    | 复制时刻的源端口               | 通常相同                                                     |
+| 目的端口      | 复制时刻的目的端口，后续可能被 DNAT | 复制时刻的目的端口             | <span style="color:red">TEE 不会自动改端口</span>            |
+| 协议          | TCP / UDP / ICMP 等                 | 与复制时刻原包一致             | 通常相同                                                     |
+| 源 MAC        | 当前链路上的源 MAC                  | 重新发往 gateway 时重新封装    | 通常不同                                                     |
+| 目的 MAC      | 当前链路上的目的 MAC                | 通常是 gateway 的 MAC          | <span style="color:red">L2 目的 MAC 通常不同</span>          |
+| mark / fwmark | 如果复制前已有 mark，则原包带 mark  | 通常继承复制时刻 skb mark      | <span style="color:red">取决于 TEE 执行前是否已 MARK</span>  |
+| conntrack     | 正常参与连接跟踪                    | 不应视为完整业务连接           | 镜像包不是新建完整连接                                       |
+| 是否期待回包  | 是                                  | 通常不应期待有效回包           | TEE 更适合单向镜像                                           |
+| 常见用途      | 正常业务通信                        | 镜像、抓包、审计、UDP 单向复制 |                                                              |
+
+---
+
